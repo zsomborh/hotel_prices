@@ -1,0 +1,191 @@
+---
+title: "Analysis on hotel prices"
+author: "Zsombor Hegedus"
+date: '2021 february 6 '
+output:  pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r prep, include=FALSE}
+rm(list=ls())
+
+
+library(tidyverse)
+library(caret)
+library(ranger)
+library(ggpubr)
+data_in <- 'C:/Workspace/R_directory/CEU/Data_Analysis_3/da_data_repo/hotels-europe'
+
+df_price <- read_csv(paste0(data_in,'/clean/hotels-europe_price.csv'))
+df_price = df_price[df_price$year == 2018 & df_price$month == 6, ]
+df_features <- read_csv(paste0(data_in,'/clean/hotels-europe_features.csv'))
+
+df = merge(df_price,df_features)
+
+
+df <-
+df %>% 
+    mutate(
+        accommodation_type = 
+            ifelse(accommodation_type %in% c('Bed and breakfast', 'Hostel','Motel' ),'hostel',
+                   ifelse(accommodation_type == 'Hotel','hotel',
+                          ifelse(accommodation_type %in% c('Apart-hotel','Apartment', 'Vacation home Condo' ), 'apartment', 
+                                 ifelse(accommodation_type %in% c('Guest House', 'Inn', 'Pension', 'Cabin / Lodge', 'Cottage', 'Country House'), 'guest_house', accommodation_type)))),
+        offer_cat = 
+            factor(ifelse(offer_cat %in% c('15-50% offer', '50%-75% offer', '75%+ offer' ),'15%+ offer',offer_cat)),
+        offer_cat = gsub(" no offer$| offer$", "", offer_cat),
+        offer = NULL,
+        stars = NULL,
+        ratingta = NULL,
+        ratingta_count = NULL,
+        year = NULL, 
+        month = NULL,
+        holiday = NULL,
+        weekend = NULL,
+        center1label = NULL,
+        nnights = NULL,
+        flag_rating = ifelse(is.na(rating), 1,0),
+        rating = ifelse(is.na(rating),as.numeric(median(rating, na.rm=T)),as.numeric(rating)),
+        flag_rating_reviewcount = ifelse(is.na(rating_reviewcount), 1,0),
+        rating_reviewcount = ifelse(is.na(rating_reviewcount), mean(rating_reviewcount, na.rm=TRUE),rating_reviewcount ),
+        price = as.numeric(price),
+        distance = as.numeric(distance),
+        rating_reviewcount = as.numeric(rating_reviewcount),
+        distance_alter = as.numeric(distance_alter),
+        scarce_room =factor(scarce_room)
+    ) %>% 
+    filter(
+        !is.na(accommodation_type),
+        accommodation_type %in% c('hotel','apartment', 'guest_house', 'hostel')
+    ) %>% 
+    mutate(accommodation_type = factor(accommodation_type))
+
+df<- df %>% filter(price < 1500)
+
+# create holdout and train set
+
+set.seed(7)
+train_indices <- as.integer(createDataPartition(df$price, p = 0.7, list = FALSE))
+df_train <- df[train_indices, ]
+df_holdout <- df[-train_indices, ]
+
+# Read in rf model
+
+rf_model <- readRDS('C:/Workspace/R_directory/CEU/Data_Analysis_3/own_work/rf_model.rds') 
+
+#check results
+
+cv_results_table <- rf_model$results %>% as.data.frame %>% select(c(mtry, min.node.size, RMSE))
+
+colnames(cv_results_table) <- c('Vars to select', 'Minimum node size', 'RMSE')
+
+#evaluate model on the holdouot set
+
+data_holdout_w_prediction <- df_holdout %>%
+    mutate(predicted_price = predict(rf_model, newdata = df_holdout))
+
+
+df$pred_price <-  predict(rf_model, newdata = df)
+
+cv_rmse <- cv_results_table[cv_results_table$`Vars to select` == 13 & cv_results_table$`Minimum node size` == 15,]$RMSE
+cv_mean_p <- mean(df_train$price)
+cv_line <- c('CV RMSE',round(cv_rmse,3), round(cv_mean_p,3), round(cv_rmse/cv_mean_p,3))
+
+holdout_rmse <- RMSE(data_holdout_w_prediction$predicted_price,data_holdout_w_prediction$price)
+holdout_mean_p <- mean(data_holdout_w_prediction$price)
+holdout_line <- c('Holdout RMSE',round(holdout_rmse,3), round(holdout_mean_p,3), round(holdout_rmse/holdout_mean_p,3))
+
+total_rmse <- RMSE(df$pred_price,df$price)
+total_mean_p <- mean(df$price)
+total_line <- c('All data RMSE',round(total_rmse,3), round(total_mean_p,3), round(total_rmse/total_mean_p,3))
+
+results_sum <- rbind(cv_line,holdout_line,total_line) %>% as.data.frame
+
+rownames(results_sum) = c()
+colnames(results_sum) = c(' ', 'RMSE', 'Mean Price', 'RMSE - norm')
+
+# Variable importance plots 
+
+var_imp <- importance(rf_model$finalModel)/1000
+var_imp_df <-
+    data.frame(varname = names(var_imp),imp = var_imp) %>%
+    arrange(desc(imp)) %>%
+    mutate(imp_percentage = imp/sum(imp))
+
+
+# for grouped varimp plot
+cities <- subset(var_imp_df$varname, grepl('city', var_imp_df$varname))
+
+group_var_imp_df <- 
+var_imp_df %>%  
+    mutate(group = ifelse(varname %in% cities, 'city' ,varname)) %>%
+    group_by(group) %>% 
+    summarise(group_imp_sum = sum(imp_percentage))
+```
+
+## Summary
+
+This document is to build a random forest model on the `hotels_europe` dataset that is freely available on [Gabors Data Analysis sit](https://gabors-data-analysis.com/data-and-code/). I wish to build a predictive model for hotel prices, using this versatile dataset that contains more than 20k observations on hotels from all around the globe. After cleaning my data, I will experiment with different tuning approaches to arrive and see how they can improve the predictive power of the model. Once the best model is identified, I examine variable importance plots to showcase the most important predictors that the model used for price prediction
+
+The analysis is submitted as data exercise from Chapter 16 exercise 5. Workfiles are available in my [github repo](https://github.com/zsomborh/hotel_prices).  
+
+## Data 
+
+After joining the `hotels_europe_price` and `hotels_europe_features` csvs, I merged them and filtered for June, 2018. This seemed like a good choice for a date given that it is not very far into the past, yet data is collected in a non-stressed environment (free of the the COVID-19 pandemic e.g.). I further filtered out observations with not available accommodation type, and decided to keep only those, that I identified as either *hostels*, *hotels*, *apartments* or *guest_houses*. Furthermore I filtered out accommodations that had prices higher than $1,500 as those were extreme values that were suspiciously expensive. I filled NAs for the `rating` and the `rating_reviewcount` variables - I used the median and mean respectively - and left a flag in case imputation was used. The total number of observations was 14.000. 
+
+Overall I had the following predictors: whether the accomodation was advertised with a discount, if room was noted as scarce, the city of the accommodation, distance from city center, average rating, count of ratings, distance from alternative city center, accomodation type and the flags I created for imputed metrics. This is 10 variables in total, however since some of them are factor variables that were transformed to dummies when used by models - the final number of variables included was 57. 
+
+## Modeling
+
+I used machine learning for prediction by using a random forest model. I first stripped out a 30% random sample and trained models on the remaining 70%. I used 5-fold cross validation with RMSE being my loss function and grew 500 trees with every iteration. For tuning, I first looked at 4 scenarios regarding how many variables I allowed to stay in a terminal node - these are under column: *Minimum node size*. I also looked at 5 other scenarios in which limited the number of variables to choose from (further referred to as $m$ parameter) for a split in any tree of the random forest - these are under the *Vars to select* column. The end result is the below table, where one can see RMSE in 20 different scenarios:
+
+\newpage
+
+```{r table 1, echo = FALSE , results = "asis", warning = FALSE, message = FALSE }
+knitr::kable(cv_results_table, caption= 'RMSEs for Model comparison based on different tuning parameters') 
+```
+
+The best tuning scenario was the case when I allowed the tree to have 15 observation in the terminal nodes, while variables to be selected was limited to 13 variables only. When I was looking at different scenarios it was apparent that I can mildly reduce the prediction error if I increase the $m$ parameter from 3 to 9, but it just slighly improved the RMSE afterwards - hence the golden rule of using the square root of the number of variables seems to be true here as well. In terms of minimum node size, it seemed that there is not much of a difference when allowing 5, 7, 10 or 15 observations, but generally, the higher this was, the lower the resulting RMSE. 
+
+The best model had a cross validated RMSE of 102.8163. Not only that, it also faired quite well on the holdout set and the whole dataset as well. Table 2 summarises the RMSE results in their raw form and when normalised by the mean price. We can see that RMSE is highest in the cross validated case, and slightly lower on the holdout set, and surprisingly low when measuring it on the whole dataset.   
+
+
+```{r table 2, echo = FALSE , results = "asis", warning = FALSE, message = FALSE }
+knitr::kable(results_sum, caption= 'Model performance on the working set, holdout set and the whole dataset', digits = c(0,3,3)) 
+```
+
+I also created two charts to look at variable importance of the best rf model, which can be seen in Figure 1. The first chart visualises variable importance for the top 10 predictor, while the second shows every predictor, but the city dummies are grouped together. From these charts we can't draw conclusions on casuality, or associations but what we can say is that, when predicting the price of our inspected accomodations, the trees in the random forest were mostly split by these categories. So if they were important for the random forest, they are important for the predictions as well. If anyone wishes to price their accomodations, they should make sure that they include variables on the rating of the listing, the distance from the city center, and also in which city, their accomodation is located at. The grouped importance chart shows it very clearly that the city variable is essential when predicting, and could probably mean that there are very different price levels for different cities in the dataset.
+
+```{r, fig 1, fig.width=10,fig.height=5, fig.align='center', fig.cap='Top 10 and Grouped city variable importance plots', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+p1 <- ggplot(var_imp_df[1:10,], aes(x=reorder(varname, imp), y=imp_percentage)) +
+    geom_point(colour="navyblue", size=1) +
+    geom_segment(aes(x=varname,xend=varname,y=0,yend=imp_percentage), colour="navyblue", size=0.75) +
+    ylab("Importance (Percent)") +
+    xlab("Variable Name") +
+    coord_flip() +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    theme_bw() +
+    theme(axis.text.x = element_text(size=8), axis.text.y = element_text(size=8),
+          axis.title.x = element_text(size=8), axis.title.y = element_text(size=8))
+          
+p2<- ggplot(group_var_imp_df, aes(x=reorder(group, group_imp_sum), y=group_imp_sum)) +
+    geom_point(colour="navyblue", size=1) +
+    geom_segment(aes(x=group,xend=group,y=0,yend=group_imp_sum), colour="navyblue", size=0.75) +
+    ylab("Importance (Percent)") +
+    xlab("Variable Name") +
+    coord_flip() +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    theme_bw() +
+    theme(axis.text.x = element_text(size=8), axis.text.y = element_text(size=8),
+          axis.title.x = element_text(size=8), axis.title.y = element_text(size=8))
+          
+ggarrange(p1,p2, nrow = 1)
+```
+
+## Conclusions
+
+I set out to examine the `hotels_europe` dataset and to build a model to predict the prices of accommodations using machine learining techniques. After experimenting with different tuning parameters my best model had a minimum node size of 15 and limited the number of variables to select from to 13. One of the conclusions of the analysis is that tuning can improve the RMSE, until a point, but then it looks to be less effective afterwards. Another important note is that the `city` predictor was the most important variable for the model signalling that there is a big variation between accommodation prices between different cities.
